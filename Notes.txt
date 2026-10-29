@@ -1,0 +1,42 @@
+Involvement:
+-How much involvement do you want me to have
+	a. Peer review manager?
+	b. Editor?
+	c. Author?
+
+Publishing:
+-Where do you want to publish this report?
+	a. CNMF website?
+	b. Science Report Series?
+	c. Other?
+-Depending on where you want to publish, I think there can be different levels of editing
+
+
+-Here are my views on the paper thus far- only high level
+
+-Here's what I liked (Rose)
+- 
+- Detection counts of all the different species of birds
+- Most abundant species
+- Migratory vs resident birds
+- Rare birds
+
+Here's what needs work/needs consideration (Thorn)
+- I think it misses the point to compare and contrast sites. They are too close to each other, and too similar. Instead I suggest pooling all sites as one. 
+-cant make conclusions about "vegetation type" of each site- they are mixed and all close to each other
+- Also your assessment is incredibly qualitative for site characteristics
+-Therefore we cannot make conclusions of associations between vegetation type of site and bird composition.
+-We need more concrete info on survey numbers per year
+	-I dont think that 4-10 surveys is enough replication to compare and contrast sites...Will have to run a power analysis. 
+- How do you address misidentification? How many people lead these surveys? and has it changed over time
+- Rare vs rare to Cabr differentiation. Confusing bc some species are not rare species
+- Bad choice to use simpsons diversity index, unless comparing same site (CABR) over time. Can't use it to compare site locations at cabr bc it is too similar (Shown in results). Suggest using Pielou's evenness and richness of CABR as a site.
+-Take out all of the PERMANOVA to assess site difference, for reasons stated earlier 
+	
+
+Here is how we can proceed forward (bud)
+- Add figure that shows how many surveys conducted per year
+- Power analysis for how many surveys are necessary every year
+- Separate richness and evenness metric, if you want to look at site comparison. Can be cool to look at richness over time. Or whole site evenness and richness metrics
+ 
+

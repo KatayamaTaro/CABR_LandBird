@@ -1,0 +1,639 @@
+---
+title: "Landbird Stats"
+author: "Samantha Buck"
+date: "2025-07-03"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+```
+
+
+```{r}
+bird_data <- read_csv("../Data/split_data.csv")
+
+# make unique sites, dates, and species combos
+all_sites <- unique(bird_data$Site)
+all_dates <- unique(bird_data$Date)
+all_species <- unique(bird_data$CommonName)
+
+# Expand full grid: every Site x Date x Species combo
+full_grid <- expand_grid(Site = all_sites,
+                         Date = all_dates,
+                         CommonName = all_species)
+
+#  counts summarized by Site + Date + Species
+site_date_species <- bird_data %>%
+  group_by(Site, Date, CommonName) %>%
+  summarize(Abundance = sum(`Number of Individuals`), .groups = "drop")
+
+# Join to full grid fills in zeros where missing
+site_date_species <- site_date_species %>%
+  right_join(full_grid, by = c("Site", "Date", "CommonName")) %>%
+  mutate(Abundance = replace_na(Abundance, 0))
+
+# Pivot wider to make species matrix
+site_species_matrix <- site_date_species %>%
+  pivot_wider(names_from = CommonName,
+              values_from = Abundance) %>%
+  arrange(Site, Date)
+
+# check 
+head(site_species_matrix)
+
+# build the matrix, remove Site and Date columns
+site_species_matrix_filtered <- site_species_matrix %>%
+  mutate(row_total = rowSums(select(., -Site, -Date))) %>%
+  filter(row_total > 0)
+
+bird_matrix <- site_species_matrix_filtered %>%
+  select(-Site, -Date, -row_total) %>%
+  as.matrix()
+
+site_factor <- factor(site_species_matrix_filtered$Site)
+
+# square root transform and add dummy
+bird_matrix_sqrt <- sqrt(bird_matrix) + 1
+
+# distance matrix
+birds_distmat <- vegdist(bird_matrix_sqrt, method = "bray")
+
+
+permanova_results <- adonis2(birds_distmat ~ site_factor, permutations = 999)
+
+print(permanova_results)
+```
+
+```{r}
+#NMDs all birds
+nmds_perm <- metaMDS(birds_distmat, k = 2, trymax = 100)
+
+nmds_points_perm <- as.data.frame(scores(nmds_perm, "sites"))
+nmds_points_perm$Site <- site_species_matrix_filtered$Site
+
+
+ggplot(nmds_points_perm, aes(x = NMDS1, y = NMDS2, color = factor(Site))) +
+  geom_point(size = 2) +
+  stat_ellipse(aes(group = factor(Site))) +
+  labs(title = "NMDS of Bird Communities by Site",
+       color = "Site") +
+  theme_minimal() +
+  scale_color_manual(values = c(
+      "1" = "red",
+  "2" = "orange",
+  "3" = "yellow",
+  "4" = "lightgreen",
+  "5" = "darkgreen",
+  "6" = "lightblue",
+  "7" = "blue",
+  "8" = "darkblue",
+  "9" = "purple",
+  "10" = "magenta",
+  "11" = "pink"
+
+))
+
+```
+
+
+
+```{r}
+# SIMPER analysis pt1
+
+simper_results <- simper(bird_matrix_sqrt, site_factor)
+
+simper_summaries <- summary(simper_results)
+
+important_species_all <- lapply(simper_summaries, function(s) {
+  s$cumsum <- cumsum(s$average / sum(s$average) * 100)
+  rownames(s[s$cumsum <= 80, ])
+})
+
+important_species_all
+```
+
+
+```{r}
+#SIMPER pt2
+
+
+# All SIMPER pairwise summaries combine
+simper_summaries <- summary(simper_results)
+
+pair_names <- names(simper_results)
+
+
+simper_all <- map2_dfr(
+  simper_summaries,
+  pair_names,
+  ~ {
+    df <- as.data.frame(.x)
+    df$Species <- rownames(df)
+    df$cumsum <- cumsum(df$average / sum(df$average) * 100)
+    df$Comparison <- .y
+    df %>%
+      filter(cumsum <= 80) %>%
+      select(Comparison, Species, average, sd, ratio, ava, avb, cumsum)
+  }
+)
+
+
+print(simper_all)
+```
+
+
+
+```{r}
+# Run NMDS again with SIMPER scores for first pairwise site comparison
+nmds_simp <- metaMDS(bird_matrix_sqrt, k = 2)
+
+
+species_scores <- scores(nmds_simp, display = "species")
+species_scores <- as.data.frame(species_scores)
+species_scores$species <- rownames(species_scores)
+
+
+species_scores_filtered <- species_scores[species_scores$species %in% important_species, ]
+
+# NMDS site scores with SIMPER
+site_scores <- as.data.frame(scores(nmds_simp, display = "sites"))
+site_scores$Site <- site_species_matrix_filtered$Site
+
+ggplot() +
+  geom_point(data = site_scores, aes(x = NMDS1, y = NMDS2, color = factor(Site)), size = 3) +
+  geom_segment(data = species_scores_filtered,
+               aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2),
+               arrow = arrow(length = unit(0.2, "cm")),
+               color = "black") +
+  geom_text(data = species_scores_filtered,
+            aes(x = NMDS1, y = NMDS2, label = species),
+            size = 3, hjust = 0.5, vjust = 0.5) +
+  stat_ellipse(data = site_scores, aes(x = NMDS1, y = NMDS2, group = Site, color = factor(Site))) +
+  theme_minimal() +
+  labs(title = "NMDS with Top SIMPER Species",
+       color = "Site")
+```
+
+
+
+```{r}
+install.packages("pairwise.adonis")
+```
+
+
+```{r}
+#yay working pairwise PERMANOVA
+
+library(pairwiseAdonis)
+library(vegan)
+library(dplyr)
+
+# Matrix: numeric species counts
+bird_matrix_pair <- site_species_matrix %>%
+  select(-Site, -Date)
+
+bird_matrix_pair[] <- lapply(bird_matrix_pair, as.numeric)
+bird_matrix_pair <- as.matrix(bird_matrix_pair)
+
+# Site factor
+site_factor_pair <- factor(site_species_matrix$Site)
+
+# Remove empty rows
+row_totals_pair <- rowSums(bird_matrix_pair)
+bird_matrix_pair <- bird_matrix_pair[row_totals_pair > 0, ]
+site_factor_pair <- site_factor_pair[row_totals_pair > 0]
+
+
+bird_matrix_pair <- sqrt(bird_matrix_pair) + 1
+
+# Distance matrix
+birds_distmat <- vegdist(bird_matrix_pair, method = "bray")
+
+# Pairwise PERMANOVA
+pairwise_results <- pairwise.adonis(
+  x = bird_matrix_pair,
+  factors = site_factor_pair,
+  sim.method = "bray",
+  perm = 999,
+  p.adjust.m = "bonferroni"
+)
+
+print(pairwise_results)
+
+write_csv(pairwise_results, "C:/Users/chick/OneDrive/Documents/Birdies/pariwise_results.csv")
+```
+
+
+```{r}
+#pairwise PERMANOVA heatmap
+
+library(tidyr)
+library(ggplot2)
+
+# Separate comparssion pairs to two columns
+pairwise_df <- pairwise_results %>%
+  separate(col = pairs, into = c("Site1", "Site2"), sep = " vs ") %>%
+  mutate(p.value = as.numeric(p.value),
+         R2 = as.numeric(R2))
+
+# matrix for heatmap
+heatmap_data <- pairwise_df %>%
+  select(Site1, Site2, R2) %>%
+  pivot_wider(names_from = Site2, values_from = R2)
+
+ordered_levels <- as.character(1:11)
+
+pairwise_df <- pairwise_df %>%
+  mutate(Site1 = factor(Site1, levels = ordered_levels),
+         Site2 = factor(Site2, levels = ordered_levels))
+
+ggplot(pairwise_df, aes(x = Site1, y = Site2, fill = R2)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  theme_minimal() +
+  coord_fixed() +
+  labs(title = "Pairwise PERMANOVA (R² from PERMANOVA)",
+       x = "Site", y = "Site", fill = "R²") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+install.packages("indicspecies")
+```
+
+
+```{r}
+#indicator species analysis
+
+library("indicspecies")
+data(site_species_matrix)
+
+bird_matrix_raw <- site_species_matrix %>%
+  select(-Site, -Date) %>%
+  as.data.frame() %>%
+  mutate(across(everything(), as.numeric))
+
+bird_matrix_raw[] <- lapply(bird_matrix_raw, as.numeric)
+bird_matrix_raw <- as.data.frame(bird_matrix_raw) 
+
+factor_site <- factor(site_species_matrix$Site)
+
+row_totals_indc <- rowSums(bird_matrix_raw)
+bird_matrix_raw <- bird_matrix_raw[row_totals_indc > 0, ]
+site_factor_zero <- factor_site[row_totals_indc > 0]
+
+indval_results <- multipatt(bird_matrix_raw, factor_site, func = "IndVal.g", control = how(nperm=999))
+
+summary(indval_results)
+```
+
+```{r}
+#Table for indicator species analysis
+
+
+library(dplyr)
+library(tibble)
+
+
+summary_obj <- summary(indval_results)
+
+sig_df <- indval_results$sign %>%
+  as.data.frame() %>%
+  rownames_to_column("Species") %>%
+  filter(p.value <= 0.05)
+
+sig_df <- sig_df %>%
+  mutate(Groups = apply(select(., starts_with("s.")), 1, function(x) {
+    paste(which(x == 1), collapse = ",")
+  })) %>%
+  select(Species, stat, p.value, Groups) %>%
+  rename(IndVal = stat, p_value = p.value)
+
+css <- c("1", "2", "5", "7", "9")
+chaparral <- c("3", "4", "11")
+mixed <- c("6", "8", "10")
+
+sig_df <- sig_df %>%
+  mutate(Vegetation = sapply(strsplit(Groups, ","), function(group_list) {
+    group_list <- trimws(group_list)
+    types <- unique(c(
+      if (any(group_list %in% css)) "Coastal Sage Scrub" else NULL,
+      if (any(group_list %in% chaparral)) "Chaparral" else NULL,
+      if (any(group_list %in% mixed)) "Mixed" else NULL
+    ))
+    paste(types, collapse = ", ")
+  }))
+library(gt)
+
+sig_df %>%
+  arrange(desc(IndVal)) %>%
+  gt() %>%
+  tab_header(title = "Significant Indicator Species by Vegetation Type") %>%
+  fmt_number(columns = c(IndVal, p_value), decimals = 3)
+
+write_csv(sig_df, "C:/Users/chick/OneDrive/Documents/Birdies/sig_df.csv")
+
+```
+
+
+
+```{r}
+# Jaccard Index, used heat map (ugly)
+
+library(vegan)
+
+row_totals_jac <- rowSums(bird_matrix)
+bird_matrix_jac <- bird_matrix[row_totals_jac > 0, ]
+site_factor_jac <- site_factor[row_totals_jac > 0]
+
+bird_matrix_jac_pa <- decostand(bird_matrix_jac, method = "pa")
+jaccard_dist <- vegdist(bird_matrix_jac_pa, method = "jaccard")
+nmds_jac <- metaMDS(jaccard_dist)
+nmds_points_jac <- as.data.frame(scores(nmds_jac))
+nmds_points_jac$Site <- site_factor_jac
+
+jaccard_matrix <- as.matrix(jaccard_dist)
+heatmap(jaccard_matrix,
+        Rowv = NA, Colv = NA,
+        col = viridis::viridis(100),
+        scale = "none",
+        margins = c(5,5),
+        main = "Jaccard Dissimilarity Heatmap")
+
+
+```
+
+
+```{r}
+# dbRDA plot with species plotted
+
+library(tidyverse)
+library(vegan)
+
+veg_data <- read_csv("C:/Users/chick/OneDrive/Documents/Birdies/split_data.csv")
+
+veg_species <- veg_data %>%
+  group_by(Site, CommonName) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = CommonName,
+              values_from = Count,
+              values_fill = 0)
+
+env_data <- veg_data %>%
+  distinct(Site, `Vegetation Type`)
+
+env_data <- veg_species %>%
+  select(Site) %>%
+  left_join(env_data, by = "Site")
+
+veg_matrix <- veg_species %>%
+  select(-Site) %>%
+  as.data.frame()
+
+rownames(veg_matrix) <- veg_species$Site
+all(rownames(veg_matrix) == env_data$Site)
+
+
+env_data$`Vegetation Type` <- as.factor(env_data$`Vegetation Type`)
+
+
+dbRDA_result <- capscale(veg_matrix ~ `Vegetation Type`, data = env_data, distance = "bray")
+
+summary(dbRDA_result)
+
+
+site_scores_dbrda <- scores(dbRDA_result, display = "sites") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Site")
+
+species_scores_dbrda <- scores(dbRDA_result, display = "species") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "CommonName")
+
+
+veg_centroids <- scores(dbRDA_result, display = "cn") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "VegetationType")
+
+
+veg_centroids$VegetationType <- gsub("^Vegetation Type", "", veg_centroids$VegetationType)
+veg_centroids$VegetationType <- gsub("^VegetationType", "", veg_centroids$VegetationType)
+
+
+library(ggplot2)
+
+ggplot() +
+  # Sites aslabels
+  geom_text(
+    data = site_scores_dbrda,
+    aes(x = CAP1, y = CAP2, label = Site),
+    color = "black",
+    size = 3
+  ) +
+
+  # Vegetation centroids
+  geom_point(
+    data = veg_centroids,
+    aes(x = CAP1, y = CAP2),
+    color = "red",
+    size = 3,
+    shape = 23,
+    fill = "red"
+  ) +
+  geom_segment(
+    data = veg_centroids,
+    aes(x = 0, y = 0, xend = CAP1, yend = CAP2),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "red"
+  ) +
+  geom_text(
+    data = veg_centroids,
+    aes(x = CAP1, y = CAP2, label = VegetationType),
+    color = "red",
+    nudge_y = 0.1,
+    size = 3
+  ) +
+
+  geom_text(
+    data = species_scores_dbrda,
+    aes(x = CAP1, y = CAP2, label = CommonName),
+    color = "blue",
+    nudge_y = -0.1,
+    size = 2.5
+  ) +
+
+  theme_minimal() +
+  labs(
+    x = "dbRDA1",
+    y = "dbRDA2",
+    title = "dbRDA: Sites, Vegetation Centroids, and Bird Species"
+  )
+```
+
+```{r}
+#dbRDA plot without species plotted
+library(tidyverse)
+library(vegan)
+
+veg_data <- read_csv("C:/Users/chick/OneDrive/Documents/Birdies/split_data.csv")
+
+veg_species <- veg_data %>%
+  group_by(Site, CommonName) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = CommonName,
+              values_from = Count,
+              values_fill = 0)
+
+env_data <- veg_data %>%
+  distinct(Site, `Vegetation Type`)
+
+env_data <- veg_species %>%
+  select(Site) %>%
+  left_join(env_data, by = "Site")
+
+veg_matrix <- veg_species %>%
+  select(-Site) %>%
+  as.data.frame()
+
+rownames(veg_matrix) <- veg_species$Site
+all(rownames(veg_matrix) == env_data$Site)
+
+
+env_data$`Vegetation Type` <- as.factor(env_data$`Vegetation Type`)
+
+
+dbRDA_result <- capscale(veg_matrix ~ `Vegetation Type`, data = env_data, distance = "bray")
+
+summary(dbRDA_result)
+
+
+site_scores_dbrda <- scores(dbRDA_result, display = "sites") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Site")
+
+species_scores_dbrda <- scores(dbRDA_result, display = "species") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "CommonName")
+
+
+veg_centroids <- scores(dbRDA_result, display = "cn") %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "VegetationType")
+
+
+veg_centroids$VegetationType <- gsub("^Vegetation Type", "", veg_centroids$VegetationType)
+veg_centroids$VegetationType <- gsub("^VegetationType", "", veg_centroids$VegetationType)
+
+
+library(ggplot2)
+
+ggplot() +
+  # Sites aslabels
+  geom_text(
+    data = site_scores_dbrda,
+    aes(x = CAP1, y = CAP2, label = Site),
+    color = "black",
+    size = 3
+  ) +
+
+  # Vegetation centroids
+  geom_point(
+    data = veg_centroids,
+    aes(x = CAP1, y = CAP2),
+    color = "red",
+    size = 3,
+    shape = 23,
+    fill = "red"
+  ) +
+  geom_segment(
+    data = veg_centroids,
+    aes(x = 0, y = 0, xend = CAP1, yend = CAP2),
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "red"
+  ) +
+  geom_text(
+    data = veg_centroids,
+    aes(x = CAP1, y = CAP2, label = VegetationType),
+    color = "red",
+    nudge_y = 0.1,
+    size = 3
+  ) +
+
+  theme_minimal() +
+  labs(
+    x = "dbRDA1",
+    y = "dbRDA2",
+    title = "dbRDA: Sites, Vegetation Centroids, and Bird Species"
+  )
+```
+
+
+```{r}
+install.packages("betapart")
+```
+
+
+```{r}
+#Baselga's total beta diversity measure using sorensen
+library(betapart)
+library(tidyr)
+library(betapart)
+
+bird_matrix_pa <- ifelse(bird_matrix > 0, 1, 0)
+bird_matrix_pa <- bird_matrix_pa[, colSums(bird_matrix_pa) > 0]
+
+beta.core <- betapart.core(bird_matrix_pa)
+
+beta_multi <- beta.multi(beta.core, index.family = "sorensen")
+print(beta_multi)
+
+
+```
+
+
+
+```{r}
+#Dominant Vegetation Table
+
+library(dplyr)
+library(tidyr)
+library(readr)
+
+
+bird_data <- read_csv("C:/Users/chick/OneDrive/Documents/Birdies/split_data.csv")
+
+
+total_obs <- nrow(bird_data)
+
+
+summary_table <- bird_data %>%
+  group_by(CommonName) %>%
+  mutate(TotalSpeciesCount = n()) %>%
+  group_by(CommonName, `Vegetation Type`) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  pivot_wider(names_from = `Vegetation Type`, values_from = Count, values_fill = 0) %>%
+  mutate(Total = rowSums(across(c("Chaparral", "Coastal Sage Scrub", "Mixed")))) %>%
+  mutate(
+    PercentOfTotal = round(100 * Total / total_obs, 2),
+    Prop_Chaparral = round(Chaparral / Total, 3),
+    Prop_Coastal = round(`Coastal Sage Scrub` / Total, 3),
+    Prop_Mixed = round(Mixed / Total, 3),
+    DominantVeg = case_when(
+      Chaparral >= `Coastal Sage Scrub` & Chaparral >= Mixed ~ "Chaparral",
+      `Coastal Sage Scrub` >= Chaparral & `Coastal Sage Scrub` >= Mixed ~ "Coastal Sage Scrub",
+      Mixed >= Chaparral & Mixed >= `Coastal Sage Scrub` ~ "Mixed"
+    )
+  ) %>%
+  select(CommonName, Total, PercentOfTotal, Prop_Chaparral, Prop_Coastal, Prop_Mixed, DominantVeg) %>%
+  arrange(desc(Total))
+print(summary_table)
+
+write_csv(summary_table, "C:/Users/chick/OneDrive/Documents/Birdies/summary_table.csv")
+```
+
