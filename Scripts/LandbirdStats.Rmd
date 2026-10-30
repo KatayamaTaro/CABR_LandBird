@@ -3,6 +3,8 @@ title: "Landbird Stats"
 author: "Samantha Buck"
 date: "2025-07-03"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r}
@@ -15,7 +17,8 @@ library(purrr)
 
 
 ```{r}
-bird_data <- read_csv("../Data/split_data.csv")
+getwd()
+bird_data <- read_csv("./Data/split_data.csv")
 
 # make unique sites, dates, and species combos
 all_sites <- unique(bird_data$Site)
@@ -43,9 +46,6 @@ site_species_matrix <- site_date_species %>%
               values_from = Abundance) %>%
   arrange(Site, Date)
 
-# check 
-head(site_species_matrix)
-
 # build the matrix, remove Site and Date columns
 site_species_matrix_filtered <- site_species_matrix %>%
   mutate(row_total = rowSums(select(., -Site, -Date))) %>%
@@ -57,49 +57,7 @@ bird_matrix <- site_species_matrix_filtered %>%
 
 site_factor <- factor(site_species_matrix_filtered$Site)
 
-# square root transform and add dummy
-bird_matrix_sqrt <- sqrt(bird_matrix) + 1
-
-# distance matrix
-birds_distmat <- vegdist(bird_matrix_sqrt, method = "bray")
-
-
-permanova_results <- adonis2(birds_distmat ~ site_factor, permutations = 999)
-
-print(permanova_results)
 ```
-
-```{r}
-#NMDs all birds
-nmds_perm <- metaMDS(birds_distmat, k = 2, trymax = 100)
-
-nmds_points_perm <- as.data.frame(scores(nmds_perm, "sites"))
-nmds_points_perm$Site <- site_species_matrix_filtered$Site
-
-
-ggplot(nmds_points_perm, aes(x = NMDS1, y = NMDS2, color = factor(Site))) +
-  geom_point(size = 2) +
-  stat_ellipse(aes(group = factor(Site))) +
-  labs(title = "NMDS of Bird Communities by Site",
-       color = "Site") +
-  theme_minimal() +
-  scale_color_manual(values = c(
-      "1" = "red",
-  "2" = "orange",
-  "3" = "yellow",
-  "4" = "lightgreen",
-  "5" = "darkgreen",
-  "6" = "lightblue",
-  "7" = "blue",
-  "8" = "darkblue",
-  "9" = "purple",
-  "10" = "magenta",
-  "11" = "pink"
-
-))
-
-```
-
 
 
 ```{r}

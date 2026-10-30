@@ -1,0 +1,109 @@
+---
+title: "LandBird_Analysis"
+author: "Taro Katayama"
+date: "2026-10-29"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+```
+
+```{r}
+landbird_raw<-read.csv("./Data/split_data.csv")
+
+landbird<- landbird_raw%>%select(Date, Site, CommonName, Start.Time, Temperature....F., Comments)%>%
+  rename(StartTime = Start.Time, 
+         Temp = Temperature....F.,
+         date= Date)%>%
+  mutate(Date = as.Date(date, format = "%m/%d/%Y"),
+         Year = year(Date),
+         Month = month(Date),
+         Day = day(Date))%>%
+  select(Date, Year, Month, Day, Site:Comments)
+
+crosswalk<- read.csv("./Data/SciCoName.csv")
+
+landbird<- landbird %>%
+  left_join(crosswalk, by = c("CommonName" = "Species"))%>%
+  select(Date, Year, Month, Day, Site.x:Comments, CommonName.y, ScientificName)%>%
+  rename(Site = Site.x,
+         Species_Code = CommonName,
+         CommonName = CommonName.y)
+
+```
+
+```{r}
+
+
+
+total_survey <- landbird %>%
+  group_by(Year) %>%
+  summarise(Total_Surveys_In_Year = n_distinct(Date), .groups = "drop")
+
+total_survey %>%
+  ggplot(aes(x = factor(Year), y = Total_Surveys_In_Year)) +
+  geom_col() +
+  labs(x = "Year", y = "Total surveys") +
+  theme_minimal(base_size = 12) + 
+  geom_text(aes(label = Total_Surveys_In_Year), vjust = -0.3)
+
+total_survey <- landbird %>%
+  group_by(Year) %>%
+  mutate(Total_Surveys_In_Year = n_distinct(Date)) %>%
+  group_by(Year, Date, CommonName, Total_Surveys_In_Year) %>%
+  summarise(Daily_Count = n(), .groups = "drop")
+
+landbird_summary<- total_survey%>%
+  group_by(Year, CommonName)%>%summarise(
+    TotalCountYearly = sum(Daily_Count),
+    MeanCountPerSurvey = TotalCountYearly / first(Total_Surveys_In_Year),
+    .groups = "drop")
+
+
+landbird_summary %>%
+  ggplot(aes(x = Year, y = MeanCountPerSurvey, color = CommonName, group = CommonName)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = scales::breaks_pretty()) +
+  labs(
+    x = "Year",
+    y = "Mean count per survey",
+    color = "Species",
+    title = "Landbird mean count per survey by year"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+top10 <- landbird_summary %>%
+  group_by(CommonName) %>%
+  summarise(Overall_Mean = mean(MeanCountPerSurvey, na.rm = TRUE)) %>%
+  slice_max(Overall_Mean, n = 10) %>%
+  pull(CommonName)
+
+#Average of yearly means (above) favors species that are consistently abundant. A species with one huge year and zeros elsewhere gets pulled down.
+
+#Total across years: swap mean() for sum() if you want the species with the highest cumulative counts.
+
+landbird_summary %>%
+  filter(CommonName %in% top10) %>%
+  ggplot(aes(x = Year, y = MeanCountPerSurvey, color = CommonName, group = CommonName)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = scales::breaks_pretty()) +
+  labs(
+    x = "Year",
+    y = "Mean count per survey",
+    color = "Species",
+    title = "Top 10 landbird species by mean count per survey"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+
+
+```
+
