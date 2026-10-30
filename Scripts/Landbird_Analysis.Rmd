@@ -10,33 +10,282 @@ editor_options:
 ```{r}
 library(tidyverse)
 library(ggplot2)
+library(vegan)
+library(mgcv)
+library(broom)
 ```
 
 ```{r}
-landbird_raw<-read.csv("./Data/split_data.csv")
-
-landbird<- landbird_raw%>%select(Date, Site, CommonName, Start.Time, Temperature....F., Comments)%>%
-  rename(StartTime = Start.Time, 
+# -----------------------------------------------------------------------------
+# 0. Data prep
+# -----------------------------------------------------------------------------
+ 
+# Convert StartTime text like "9:34 AM" or "1:15 PM" to decimal hours (24 h).
+# Also handles 24 hour text like "13:15" (no AM/PM) and "9:34:00 AM".
+to_hours <- function(x) {
+  x <- str_to_upper(str_trim(as.character(x)))
+  parts <- str_match(x, "^(\\d{1,2}):(\\d{2})(?::\\d{2})?\\s*([AP]M)?$")
+  hr <- as.numeric(parts[, 2])
+  mn <- as.numeric(parts[, 3])
+  ampm <- parts[, 4]
+  hr <- case_when(
+    ampm == "PM" & hr < 12 ~ hr + 12,
+    ampm == "AM" & hr == 12 ~ 0,
+    TRUE ~ hr
+  )
+  hr + mn / 60
+}
+ 
+# ---- 0a. Load and clean the raw files ------------------
+landbird_raw <- read.csv("./Data/split_data.csv")
+ 
+landbird <- landbird_raw %>%
+  select(Date, Site, CommonName, Start.Time, Temperature....F., Comments) %>%
+  rename(StartTime = Start.Time,
          Temp = Temperature....F.,
-         date= Date)%>%
+         date = Date) %>%
   mutate(Date = as.Date(date, format = "%m/%d/%Y"),
          Year = year(Date),
          Month = month(Date),
-         Day = day(Date))%>%
+         Day = day(Date)) %>%
   select(Date, Year, Month, Day, Site:Comments)
-
-crosswalk<- read.csv("./Data/SciCoName.csv")
-
-landbird<- landbird %>%
-  left_join(crosswalk, by = c("CommonName" = "Species"))%>%
-  select(Date, Year, Month, Day, Site.x:Comments, CommonName.y, ScientificName)%>%
+ 
+crosswalk <- read.csv("./Data/SciCoName.csv")
+ 
+landbird <- landbird %>%
+  left_join(crosswalk, by = c("CommonName" = "Species")) %>%
+  select(Date, Year, Month, Day, Site.x:Comments, CommonName.y, ScientificName) %>%
   rename(Site = Site.x,
          Species_Code = CommonName,
          CommonName = CommonName.y)
-
+ 
+# ---- 0b. Derived columns for the analyses ------------------------------------
+lb <- landbird %>%
+  as_tibble() %>%
+  filter(!is.na(Species_Code)) %>%
+  mutate(
+    Date = as.Date(Date, format = "%m/%d/%Y"),   # no-op if already a Date
+    Year = year(Date),
+    Month = month(Date),
+    doy = yday(Date),   # day of year, used as the timing covariate
+    survey_id = as.character(Date),
+    start_hr = to_hours(StartTime),
+    Temp = suppressWarnings(as.numeric(Temp))
+  )
+ 
+spp <- lb %>%
+  group_by(Species_Code) %>%
+  summarise(CommonName = first(CommonName),
+            ScientificName = first(ScientificName), .groups = "drop")
+ 
+# Sanity checks on the crosswalk join (duplicate keys in the crosswalk would
+# silently inflate detection counts)
+cat("Rows with no crosswalk match:", sum(is.na(lb$ScientificName)), "\n")
+no_time <- is.na(lb$StartTime) | lb$StartTime == "" |
+  str_detect(str_to_lower(lb$StartTime), "no data")
+cat("Rows with no StartTime recorded:", sum(no_time),
+    "| rows with no Temp recorded:", sum(is.na(lb$Temp)), "\n")
+cat("StartTime values that could not be parsed:",
+    sum(is.na(lb$start_hr) & !no_time), "\n")
+summary(lb$start_hr)   # should fall in a sensible field-day range
+if (exists("landbird_raw")) {
+  cat("Rows in raw data:", nrow(landbird_raw), "| rows after join:", nrow(lb), "\n")
+}
+ 
+# One row per survey (one row per date, sites pooled)
+surveys <- lb %>%
+  group_by(survey_id) %>%
+  summarise(
+    Date = first(Date), Year = first(Year), Month = first(Month),
+    doy = first(doy),
+    start_hr = mean(start_hr, na.rm = TRUE),   # mean across sites that day
+    Temp = mean(Temp, na.rm = TRUE),
+    detections = n(), richness = n_distinct(Species_Code),
+    .groups = "drop"
+  )
+ 
+# Zero-filled survey x species matrix of detection counts
+mat <- lb %>%
+  count(survey_id, Species_Code) %>%
+  pivot_wider(names_from = Species_Code, values_from = n, values_fill = 0) %>%
+  column_to_rownames("survey_id")
+mat <- mat[surveys$survey_id, ]
+ 
+# Quick data overview
+cat("Surveys:", nrow(surveys), "| Species:", ncol(mat),
+    "| Years:", min(lb$Year), "-", max(lb$Year), "\n")
+surveys %>% count(Year, name = "n_surveys") %>% print(n = Inf)
 ```
 
 ```{r}
+
+# -----------------------------------------------------------------------------
+# 1. Effort through time (always check this first)
+# -----------------------------------------------------------------------------
+ggplot(surveys, aes(factor(Month))) +
+  geom_bar(fill = "grey40") +
+  facet_wrap(~Year) +
+  labs(x = "Month", y = "Surveys", title = "Survey effort by month and year")
+
+# -----------------------------------------------------------------------------
+# 2. Species accumulation curve (how complete is the species list?)
+# -----------------------------------------------------------------------------
+pa <- (mat > 0) * 1
+acc <- specaccum(pa, method = "random", permutations = 200)
+plot(acc, ci.type = "polygon", ci.col = "grey85", lwd = 2,
+     xlab = "Number of surveys", ylab = "Cumulative species",
+     main = "Species accumulation")
+ 
+# Chao2 / jackknife estimates of total richness
+print(specpool(pa))
+
+# -----------------------------------------------------------------------------
+# 3. Rank abundance (Whittaker) plot: how dominated is the community?
+# -----------------------------------------------------------------------------
+rank_ab <- lb %>%
+  count(Species_Code, name = "n") %>%
+  left_join(spp, by = "Species_Code") %>%
+  arrange(desc(n)) %>%
+  mutate(rank = row_number(), prop = n / sum(n))
+ 
+ggplot(rank_ab, aes(rank, n)) +
+  geom_line(color = "grey50") +
+  geom_point() +
+  geom_text(data = head(rank_ab, 10), aes(label = CommonName),
+            hjust = -0.1, size = 3) +
+  scale_y_log10() +
+  labs(x = "Rank", y = "Total detections (log10)", title = "Rank abundance")
+
+# -----------------------------------------------------------------------------
+# 4. Phenology heatmap: detections per survey by month, top species
+# -----------------------------------------------------------------------------
+top_spp <- rank_ab$Species_Code[1:25]
+surv_per_month <- surveys %>% count(Month, name = "n_surveys")
+ 
+pheno <- lb %>%
+  filter(Species_Code %in% top_spp) %>%
+  count(Species_Code, Month) %>%
+  complete(Species_Code = top_spp, Month = sort(unique(lb$Month)),
+           fill = list(n = 0)) %>%
+  left_join(surv_per_month, by = "Month") %>%
+  left_join(spp, by = "Species_Code") %>%
+  mutate(rate = n / n_surveys) %>%
+  group_by(Species_Code) %>%
+  mutate(peak = Month[which.max(rate)],
+         rate_rel = rate / max(rate, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(CommonName = fct_reorder(CommonName, peak, .desc = TRUE))
+
+ggplot(pheno, aes(factor(Month), CommonName, fill = rate_rel)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(option = "mako", direction = -1, na.value = "grey90") +
+  labs(x = "Month", y = NULL, fill = "Relative\ndetection rate",
+       title = "Pattern across surveyed months, scaled within species")
+ 
+# How consistently is each species detected across the surveyed months?
+n_months <- n_distinct(lb$Month)
+status <- lb %>%
+  group_by(Species_Code) %>%
+  summarise(n = n(), months_present = n_distinct(Month),
+            years_present = n_distinct(Year), .groups = "drop") %>%
+  mutate(frac_months = months_present / n_months,
+         status = case_when(frac_months >= 0.8 ~ "Most months",
+                            frac_months >= 0.4 ~ "Some months",
+                            TRUE ~ "Few months")) %>%
+  left_join(spp, by = "Species_Code")
+status %>% count(status)
+
+# -----------------------------------------------------------------------------
+# 6. Species level population trends (detections per survey, zero filled)
+#    Quasi-Poisson with a day of year term; reported as % change per year
+# -----------------------------------------------------------------------------
+min_surveys_detected <- 30
+common_spp <- names(which(colSums(mat > 0) >= min_surveys_detected))
+ 
+fit_trend <- function(sp) {
+  d <- surveys %>%
+    mutate(n = mat[survey_id, sp], Year_c = Year - min(Year))
+  fit <- glm(n ~ Year_c + doy, family = quasipoisson, data = d)
+  tidy(fit, conf.int = TRUE) %>%
+    filter(term == "Year_c") %>%
+    mutate(Species_Code = sp)
+}
+ 
+trends <- map_dfr(common_spp, possibly(fit_trend, otherwise = NULL)) %>%
+  left_join(spp, by = "Species_Code") %>%
+  mutate(pct = (exp(estimate) - 1) * 100,
+         lo = (exp(conf.low) - 1) * 100,
+         hi = (exp(conf.high) - 1) * 100,
+         sig = ifelse(p.value < 0.05, "p < 0.05", "n.s."),
+         CommonName = fct_reorder(CommonName, pct))
+ 
+ggplot(trends, aes(pct, CommonName, color = sig)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  geom_pointrange(aes(xmin = lo, xmax = hi)) +
+  scale_color_manual(values = c("p < 0.05" = "firebrick", "n.s." = "grey50")) +
+  labs(x = "% change in detections per survey, per year", y = NULL,
+       color = NULL, title = "Species trends")
+ 
+# Raw annual detection rate for the biggest winners and losers
+movers <- trends %>% arrange(pct) %>% slice(c(1:4, (n() - 3):n())) %>%
+  pull(Species_Code)
+ 
+annual_rate <- surveys %>%
+  select(survey_id, Year) %>%
+  bind_cols(as_tibble(mat[surveys$survey_id, movers])) %>%
+  pivot_longer(all_of(movers), names_to = "Species_Code", values_to = "n") %>%
+  group_by(Year, Species_Code) %>%
+  summarise(rate = mean(n), .groups = "drop") %>%
+  left_join(spp, by = "Species_Code")
+ 
+ggplot(annual_rate, aes(Year, rate)) +
+  geom_line() + geom_point() +
+  facet_wrap(~CommonName, scales = "free_y") +
+  labs(y = "Mean detections per survey", title = "Biggest movers")
+
+
+# -----------------------------------------------------------------------------
+# 7. Diversity through time (rarefied so uneven effort does not bias it)
+# -----------------------------------------------------------------------------
+year_mat <- lb %>%
+  count(Year, Species_Code) %>%
+  pivot_wider(names_from = Species_Code, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Year")
+ 
+div <- tibble(
+  Year = as.numeric(rownames(year_mat)),
+  detections = rowSums(year_mat),
+  observed_richness = specnumber(year_mat),
+  rarefied_richness = as.numeric(rarefy(year_mat, sample = min(rowSums(year_mat)))),
+  shannon = diversity(year_mat, "shannon"),
+  evenness = diversity(year_mat, "shannon") / log(specnumber(year_mat))
+)
+print(div)
+ 
+div %>%
+  pivot_longer(c(rarefied_richness, shannon, evenness)) %>%
+  ggplot(aes(Year, value)) +
+  geom_line() + geom_point() + geom_smooth(method = "lm", se = TRUE, alpha = 0.15) +
+  facet_wrap(~name, scales = "free_y") +
+  labs(title = "Annual diversity metrics")
+
+
+# -----------------------------------------------------------------------------
+# 11. First and last detection records, and rare species
+# -----------------------------------------------------------------------------
+records <- lb %>%
+  group_by(Species_Code) %>%
+  summarise(n = n(), first_seen = min(Date), last_seen = max(Date),
+            .groups = "drop") %>%
+  left_join(spp, by = "Species_Code") %>%
+  arrange(n)
+ 
+records %>% filter(n <= 3) %>% print(n = Inf)   # singletons and rarities
+# Species not seen in the most recent 3 years that used to be regular
+records %>%
+  filter(n >= 20, last_seen < max(lb$Date) - years(3)) %>%
+  print(n = Inf)
+
 
 
 
@@ -62,7 +311,6 @@ landbird_summary<- total_survey%>%
     TotalCountYearly = sum(Daily_Count),
     MeanCountPerSurvey = TotalCountYearly / first(Total_Surveys_In_Year),
     .groups = "drop")
-
 
 landbird_summary %>%
   ggplot(aes(x = Year, y = MeanCountPerSurvey, color = CommonName, group = CommonName)) +
@@ -103,7 +351,7 @@ landbird_summary %>%
   theme_minimal(base_size = 12) +
   theme(legend.position = "right")
 
-
+colnames(landbird)
 
 ```
 
